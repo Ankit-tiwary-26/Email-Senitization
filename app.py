@@ -1,132 +1,78 @@
 """
-================================================================
-  EMAIL SANITIZATION SYSTEM
-  Streamlit Web App — Full Pipeline
-  
-  Designed for datasets that are 95% Gmail/Yahoo/Hotmail
-================================================================
+EMAIL SANITIZATION SYSTEM v5
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT'S NEW vs v4:
+  ✅ IPQS integration — fraud_score, spam_trap, recent_abuse, active
+  ✅ Fixed HIBP — breach RECENCY not just existence (fixes xyz1234)
+  ✅ Temporal scoring — days since last active → risk score
+  ✅ GitHub last_active from updated_at
+  ✅ Smart IPQS usage — only on borderline emails (saves free credits)
+  ✅ Last active estimate shown for every email
+  ✅ Phase-based processing — fast locals first, API calls last
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import streamlit as st
 import pandas as pd
-import re
-import socket
-import time
-import random
-import io
-from datetime import datetime, timedelta
+import re, math, hashlib, requests, time
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
-# Optional DNS
 try:
     import dns.resolver
-    DNS_AVAILABLE = True
+    DNS_OK = True
 except ImportError:
-    DNS_AVAILABLE = False
+    DNS_OK = False
 
-# ─────────────────────────────────────────────────────────────
-#  PAGE CONFIG
-# ─────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Email Sanitization System",
-    page_icon="🧹",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Email Sanitizer v5", page_icon="🧹",
+                   layout="wide", initial_sidebar_state="expanded")
 
-# ─────────────────────────────────────────────────────────────
-#  STYLING
-# ─────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    .main-header {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-        padding: 2rem;
-        border-radius: 12px;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .main-header h1 { color: #e94560; font-size: 2.2rem; margin: 0; }
-    .main-header p  { color: #a8b2d8; margin: 0.5rem 0 0 0; font-size: 1rem; }
-
-    .metric-card {
-        background: #1e1e2e;
-        border-radius: 10px;
-        padding: 1.2rem;
-        text-align: center;
-        border: 1px solid #2a2a3e;
-    }
-    .metric-card .number { font-size: 2rem; font-weight: bold; }
-    .metric-card .label  { color: #a8b2d8; font-size: 0.85rem; margin-top: 0.3rem; }
-
-    .safe     { color: #00d4aa; }
-    .medium   { color: #ffd700; }
-    .high     { color: #ff6b35; }
-    .critical { color: #e94560; }
-
-    .info-box {
-        background: #1e2a3a;
-        border-left: 4px solid #0f3460;
-        padding: 1rem 1.2rem;
-        border-radius: 0 8px 8px 0;
-        margin: 1rem 0;
-    }
-    .warn-box {
-        background: #2a1f0e;
-        border-left: 4px solid #ffd700;
-        padding: 1rem 1.2rem;
-        border-radius: 0 8px 8px 0;
-        margin: 1rem 0;
-    }
-    .stProgress .st-bo { background: #e94560; }
-
-    div[data-testid="stDataFrame"] { border-radius: 8px; }
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap');
+html,body,[class*="css"]{font-family:'DM Sans',sans-serif;}
+.hdr{background:linear-gradient(135deg,#0d1117,#161b22);border:1px solid #21262d;
+     border-radius:16px;padding:2.5rem 2rem;text-align:center;margin-bottom:1.5rem;}
+.hdr-title{font-family:'Space Mono',monospace;font-size:1.85rem;font-weight:700;color:#f0f6fc;margin:0;}
+.hdr-sub{color:#8b949e;font-size:0.9rem;margin:.4rem 0 0;}
+.badge{display:inline-block;padding:.2rem .7rem;border-radius:20px;
+       font-size:.73rem;font-family:'Space Mono',monospace;margin:.2rem .1rem;}
+.b-blue{background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.3);color:#58a6ff;}
+.b-green{background:rgba(63,185,80,.12);border:1px solid rgba(63,185,80,.3);color:#3fb950;}
+.b-orange{background:rgba(240,136,62,.15);border:1px solid rgba(240,136,62,.35);color:#f0883e;}
+.b-purple{background:rgba(188,140,255,.12);border:1px solid rgba(188,140,255,.3);color:#bc8cff;}
+.info{background:rgba(88,166,255,.07);border:1px solid rgba(88,166,255,.2);
+      border-radius:10px;padding:1rem 1.2rem;color:#cae8ff;font-size:.88rem;margin:.8rem 0;line-height:1.7;}
+.warn{background:rgba(210,153,34,.07);border:1px solid rgba(210,153,34,.25);
+      border-radius:10px;padding:1rem 1.2rem;color:#e3b341;font-size:.88rem;margin:.8rem 0;}
+.card{background:#161b22;border:1px solid #21262d;border-radius:10px;
+      padding:.9rem;text-align:center;}
+.stButton>button{background:linear-gradient(135deg,#238636,#2ea043)!important;
+                 color:white!important;border:none!important;border-radius:8px!important;
+                 font-weight:600!important;padding:.6rem 1.5rem!important;}
 </style>
 """, unsafe_allow_html=True)
 
-
 # ─────────────────────────────────────────────────────────────
-#  DATA CONSTANTS
+#  DATASETS
 # ─────────────────────────────────────────────────────────────
-
-BIG_PROVIDERS = {
-    "gmail.com", "googlemail.com",
-    "yahoo.com", "yahoo.co.uk", "yahoo.co.in", "yahoo.com.au",
-    "yahoo.ca", "yahoo.fr", "yahoo.de", "ymail.com", "rocketmail.com",
-    "hotmail.com", "hotmail.co.uk", "hotmail.fr", "hotmail.in",
-    "outlook.com", "outlook.in", "outlook.co.uk",
-    "live.com", "live.co.uk", "live.in", "msn.com",
-    "icloud.com", "me.com", "mac.com",
-    "rediffmail.com", "protonmail.com", "proton.me",
+BIG = {
+    "gmail.com","googlemail.com","yahoo.com","yahoo.co.uk","yahoo.co.in",
+    "yahoo.com.au","yahoo.ca","yahoo.fr","yahoo.de","ymail.com","rocketmail.com",
+    "hotmail.com","hotmail.co.uk","hotmail.fr","hotmail.in",
+    "outlook.com","outlook.in","outlook.co.uk","live.com","live.co.uk",
+    "live.in","msn.com","icloud.com","me.com","mac.com",
+    "rediffmail.com","protonmail.com","proton.me","zoho.com",
 }
-
-TYPO_MAP = {
-    # Gmail
-    "gmial.com":"gmail.com","gmaill.com":"gmail.com","gmal.com":"gmail.com",
-    "gmai.com":"gmail.com","gmali.com":"gmail.com","gmail.co":"gmail.com",
-    "gmail.cm":"gmail.com","gmail.cmo":"gmail.com","gmail.con":"gmail.com",
-    "gnail.com":"gmail.com","gamil.com":"gmail.com","gmaim.com":"gmail.com",
-    "gemail.com":"gmail.com","gmail.ocm":"gmail.com","gmailcom":"gmail.com",
-    # Yahoo
-    "yaho.com":"yahoo.com","yahooo.com":"yahoo.com","yhoo.com":"yahoo.com",
-    "yhaoo.com":"yahoo.com","yahoo.co":"yahoo.com","yahoo.cm":"yahoo.com",
-    "yaoo.com":"yahoo.com","ahoo.com":"yahoo.com","yahoo.cmo":"yahoo.com",
-    "yaho.co.in":"yahoo.co.in","yahoomail.com":"yahoo.com",
-    # Hotmail
-    "hotmai.com":"hotmail.com","hotmial.com":"hotmail.com",
-    "hotmaill.com":"hotmail.com","hotmal.com":"hotmail.com",
-    "hotmali.com":"hotmail.com","hotmail.co":"hotmail.com",
-    "hotmail.cm":"hotmail.com","hotmail.cmo":"hotmail.com",
-    "homail.com":"hotmail.com","hotmeil.com":"hotmail.com",
-    # Outlook
-    "outlok.com":"outlook.com","outloo.com":"outlook.com",
-    "outllok.com":"outlook.com","outlook.co":"outlook.com",
-    "otlook.com":"outlook.com","ourlook.com":"outlook.com",
-    # Rediff
-    "rediff.com":"rediffmail.com","redifmail.com":"rediffmail.com",
+TRAPS = {
+    "spamtrap.ro","spamgourmet.com","spamgourmet.net","spamgourmet.org",
+    "spamhole.com","spamcop.net","spam.la","spamex.com","spam.su",
+    "mailnull.com","deadaddress.com","darkharvestspam.com",
+    "trap.email","spamtrap.com","spamtrap.net","spamoff.de",
+    "example.com","example.net","example.org","test.com",
+    "invalid.com","nowhere.com","devnull.com",
 }
-
-DISPOSABLE_DOMAINS = {
+DISPOSABLE = {
     "mailinator.com","mailinator.net","yopmail.com","yopmail.fr",
     "tempmail.com","temp-mail.org","temp-mail.io","tempmail.net",
     "tempr.email","10minutemail.com","10minutemail.net","10minutemail.org",
@@ -136,738 +82,879 @@ DISPOSABLE_DOMAINS = {
     "trashmail.net","trashmail.at","trashmail.io","trashmail.xyz",
     "mohmal.com","mytemp.email","discard.email","maildrop.cc",
     "fakeinbox.com","throwam.com","throwaway.email","getairmail.com",
-    "mailnesia.com","dispostable.com",
+    "mailnesia.com","dispostable.com","filzmail.com",
 }
-
-SPAM_TRAP_DOMAINS = {
-    "spamtrap.ro","spamgourmet.com","spamgourmet.net","spamgourmet.org",
-    "spamhole.com","spamcop.net","spam.la","spamex.com",
-    "mailnull.com","deadaddress.com","darkharvestspam.com",
-    "trap.email","spamtrap.com","spamtrap.net",
-    "example.com","example.net","example.org",
-    "test.com","invalid.com","nowhere.com",
+TYPOS = {
+    "gmial.com":"gmail.com","gmaill.com":"gmail.com","gmal.com":"gmail.com",
+    "gmai.com":"gmail.com","gmali.com":"gmail.com","gmail.co":"gmail.com",
+    "gmail.cm":"gmail.com","gmail.cmo":"gmail.com","gmail.con":"gmail.com",
+    "gnail.com":"gmail.com","gamil.com":"gmail.com","gmail.ocm":"gmail.com",
+    "yaho.com":"yahoo.com","yahooo.com":"yahoo.com","yhoo.com":"yahoo.com",
+    "yhaoo.com":"yahoo.com","yahoo.co":"yahoo.com","yahoo.cmo":"yahoo.com",
+    "yaoo.com":"yahoo.com","ahoo.com":"yahoo.com","yahoomail.com":"yahoo.com",
+    "hotmai.com":"hotmail.com","hotmial.com":"hotmail.com",
+    "hotmaill.com":"hotmail.com","hotmal.com":"hotmail.com",
+    "hotmali.com":"hotmail.com","hotmail.co":"hotmail.com",
+    "hotmail.cm":"hotmail.com","hotmail.cmo":"hotmail.com",
+    "homail.com":"hotmail.com","hotmeil.com":"hotmail.com",
+    "outlok.com":"outlook.com","outloo.com":"outlook.com",
+    "outllok.com":"outlook.com","outlook.co":"outlook.com",
+    "otlook.com":"outlook.com","rediff.com":"rediffmail.com",
 }
-
-ROLE_PREFIXES = {
+ROLES = {
     "admin","administrator","webmaster","hostmaster","postmaster",
     "info","information","contact","hello","support","help","helpdesk",
     "service","customer","care","sales","marketing","billing","accounts",
-    "noreply","no-reply","donotreply","do-not-reply",
-    "abuse","spam","security","privacy","hr","jobs","careers",
-    "newsletter","news","updates","alerts","root","sys","system",
-    "press","media","legal","compliance","team","office","mail",
+    "noreply","no-reply","donotreply","do-not-reply","abuse","spam",
+    "security","privacy","hr","jobs","careers","newsletter","news",
+    "updates","alerts","root","sys","system","press","media",
+    "legal","compliance","team","office","mail",
 }
-
-EMAIL_REGEX = re.compile(
+EMAIL_RE = re.compile(
     r"^(?!.*\.\.)[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$",
-    re.IGNORECASE
-)
-
-# Username risk patterns
-PAT_RANDOM      = re.compile(r"^[bcdfghjklmnpqrstvwxyz]{5,}$")
-PAT_LONG_NUM    = re.compile(r"^[a-z]+\d{6,}$")
-PAT_PURE_NUM    = re.compile(r"^\d+$")
-PAT_SUSPICIOUS  = re.compile(
+    re.IGNORECASE)
+PAT_SUSP = re.compile(
     r"(temp|test|spam|trap|fake|dummy|null|noreply|delete|"
-    r"removed|invalid|bounce|dead|block)", re.IGNORECASE
-)
+    r"removed|invalid|bounce|dead|block)", re.IGNORECASE)
 
-
-# ─────────────────────────────────────────────────────────────
-#  MX CACHE (avoid repeated DNS lookups for same domain)
-# ─────────────────────────────────────────────────────────────
-_mx_cache = {}
-
-def check_mx(domain: str) -> bool:
-    """Check if domain has MX record. Cached."""
-    if domain in _mx_cache:
-        return _mx_cache[domain]
-    if not DNS_AVAILABLE:
-        _mx_cache[domain] = True  # Assume valid if no DNS lib
-        return True
+_mx = {}
+def has_mx(d):
+    if d in BIG: return True
+    if d in _mx: return _mx[d]
+    if not DNS_OK: _mx[d]=True; return True
     try:
-        dns.resolver.resolve(domain, "MX")
-        _mx_cache[domain] = True
-        return True
-    except Exception:
+        dns.resolver.resolve(d,"MX"); _mx[d]=True; return True
+    except:
+        try: dns.resolver.resolve(d,"A"); _mx[d]=True; return True
+        except: _mx[d]=False; return False
+
+
+# ─────────────────────────────────────────────────────────────
+#  ENTROPY HELPERS
+# ─────────────────────────────────────────────────────────────
+def entropy(s):
+    if not s: return 0.0
+    f={}
+    for c in s: f[c]=f.get(c,0)+1
+    return -sum((v/len(s))*math.log2(v/len(s)) for v in f.values())
+
+def num_density(s):
+    return sum(1 for c in s if c.isdigit())/len(s) if s else 0.0
+
+def vowel_ratio(s):
+    L=[c for c in s.lower() if c.isalpha()]
+    return sum(1 for c in L if c in "aeiou")/len(L) if L else 0.0
+
+def usernames(local):
+    b=local.split("+")[0]
+    variants=[b.replace(".",""),b,b.replace(".","-"),b.replace(".","_")]
+    seen=[]
+    for v in variants:
+        if v not in seen and len(v)>=2: seen.append(v)
+    return seen[:3]
+
+def days_since(date_str: str) -> int | None:
+    """Parse ISO date string and return days since then."""
+    if not date_str: return None
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z","+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).days
+    except:
+        return None
+
+def temporal_risk(days: int | None) -> tuple[int, str]:
+    """
+    Convert days-since-last-active to risk score + label.
+    THIS IS THE KEY FIX for xyz1234 problem.
+
+    Old logic: breach found → score DOWN (wrong)
+    New logic: how RECENT was the activity → score change
+
+    Returns (score_delta, label)
+    """
+    if days is None:
+        return 8, "Unknown"
+    if days < 90:
+        return -25, f"Very active ({days}d ago)"
+    elif days < 180:
+        return -15, f"Active ({days}d ago)"
+    elif days < 365:
+        return -5,  f"Somewhat active ({days}d ago)"
+    elif days < 730:
+        return +10, f"Dormant ({days}d ago)"
+    elif days < 1460:
+        return +20, f"Likely abandoned ({days//365}yr ago)"
+    else:
+        return +30, f"Almost certainly abandoned ({days//365}yr ago)"
+
+
+# ─────────────────────────────────────────────────────────────
+#  FOOTPRINT CHECKS
+# ─────────────────────────────────────────────────────────────
+
+def fp_gravatar(email):
+    try:
+        h    = hashlib.md5(email.encode()).hexdigest()
+        resp = requests.get(f"https://www.gravatar.com/avatar/{h}?d=404",timeout=5)
+        if resp.status_code==200:
+            return {"found":True,"source":"Gravatar","last_active":None,
+                    "detail":"Profile exists — real person confirmed","impact":-15}
+    except: pass
+    return {"found":False,"source":"Gravatar","last_active":None,"detail":"Not found","impact":0}
+
+
+def fp_github(local, gh_token=""):
+    headers={"Accept":"application/vnd.github.v3+json"}
+    if gh_token: headers["Authorization"]=f"token {gh_token}"
+    for u in usernames(local):
         try:
-            dns.resolver.resolve(domain, "A")
-            _mx_cache[domain] = True
-            return True
-        except Exception:
-            _mx_cache[domain] = False
-            return False
+            resp=requests.get(f"https://api.github.com/users/{u}",
+                               headers=headers,timeout=5)
+            if resp.status_code==200:
+                data=resp.json()
+                updated = data.get("updated_at","")
+                created = data.get("created_at","")
+                days    = days_since(updated)
+                repos   = data.get("public_repos",0)
+                tdelta, tlabel = temporal_risk(days)
+                return {
+                    "found":       True,
+                    "source":      "GitHub",
+                    "last_active": updated[:10] if updated else None,
+                    "days_inactive": days,
+                    "temporal_label": tlabel,
+                    "detail":      f"@{u} — {repos} repos — {tlabel}",
+                    "impact":      tdelta,   # Uses temporal risk, not flat -15
+                    "account_age": created[:10] if created else None,
+                }
+        except: pass
+    return {"found":False,"source":"GitHub","last_active":None,"detail":"Not found","impact":0}
+
+
+def fp_reddit(local):
+    hdrs={"User-Agent":"EmailSanitizer/5.0"}
+    for u in usernames(local):
+        try:
+            # Check account existence
+            r=requests.get(f"https://www.reddit.com/user/{u}/about.json",
+                           headers=hdrs,timeout=5)
+            if r.status_code==200:
+                data  = r.json().get("data",{})
+                karma = data.get("total_karma",0)
+                created_utc = data.get("created_utc")
+                # Get last post date
+                r2=requests.get(f"https://www.reddit.com/user/{u}/submitted.json?limit=1&sort=new",
+                                headers=hdrs,timeout=5)
+                last_post_ts = None
+                if r2.status_code==200:
+                    posts=r2.json().get("data",{}).get("children",[])
+                    if posts:
+                        last_post_ts=posts[0]["data"].get("created_utc")
+
+                if last_post_ts:
+                    from datetime import datetime,timezone
+                    dt  = datetime.fromtimestamp(last_post_ts,tz=timezone.utc)
+                    days= (datetime.now(timezone.utc)-dt).days
+                    tdelta,tlabel=temporal_risk(days)
+                    last_active_str=dt.strftime("%Y-%m-%d")
+                else:
+                    days=None; tdelta=0; tlabel="Unknown"; last_active_str=None
+
+                return {
+                    "found":True,"source":"Reddit",
+                    "last_active":last_active_str,
+                    "days_inactive":days,
+                    "temporal_label":tlabel,
+                    "detail":f"u/{u} karma:{karma:,} — last post:{tlabel}",
+                    "impact":tdelta,
+                    "account_age": datetime.fromtimestamp(
+                        created_utc,tz=timezone.utc).strftime("%Y-%m-%d") if created_utc else None,
+                }
+        except: pass
+    return {"found":False,"source":"Reddit","last_active":None,"detail":"Not found","impact":0}
+
+
+def fp_hibp(email, key):
+    """
+    FIXED HIBP LOGIC:
+    Old: breach found → score DOWN (wrong — xyz1234 problem)
+    New: use breach RECENCY via temporal_risk()
+         Recent breach → small reduction
+         Old breach    → no reduction or slight increase
+         No breach     → slight increase
+    """
+    if not key: return {"found":False,"source":"HIBP","last_active":None,"detail":"No key","impact":0}
+    try:
+        hdrs={"hibp-api-key":key.strip(),"User-Agent":"EmailSanitizer/5.0"}
+        r=requests.get(
+            f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}?truncateResponse=false",
+            headers=hdrs,timeout=8)
+        if r.status_code==200:
+            breaches=r.json()
+            years=[]
+            for b in breaches:
+                try: years.append(int(b.get("BreachDate","2000")[:4]))
+                except: pass
+            most_recent = max(years) if years else None
+            earliest    = min(years) if years else None
+
+            if most_recent:
+                # Approximate days since most recent breach
+                days_approx = (datetime.now().year - most_recent) * 365
+                tdelta,tlabel = temporal_risk(days_approx)
+                # Cap HIBP impact — breach is a WEAK proxy, not exact last-active
+                tdelta = max(tdelta, -10)   # Max reduction from HIBP = -10
+            else:
+                tdelta,tlabel=8,"Unknown"
+
+            names=[b["Name"] for b in breaches[:4]]
+            age = (datetime.now().year - earliest) if earliest else None
+
+            return {
+                "found":        True,
+                "source":       "HIBP",
+                "last_active":  f"{most_recent}-01-01" if most_recent else None,
+                "breach_count": len(breaches),
+                "breach_names": names,
+                "email_age_est": age,
+                "detail":       f"{len(breaches)} breach(es), most recent:{most_recent} — {tlabel}",
+                "impact":       tdelta,
+                "temporal_label": tlabel,
+            }
+        elif r.status_code==404:
+            return {"found":False,"source":"HIBP","last_active":None,
+                    "detail":"Not in any breach — never used publicly",
+                    "impact":+8,"breach_count":0}
+        elif r.status_code==401:
+            return {"found":False,"source":"HIBP","last_active":None,
+                    "detail":"Invalid API key","impact":0}
+    except: pass
+    return {"found":False,"source":"HIBP","last_active":None,"detail":"Check failed","impact":0}
+
+
+def fp_ipqs(email, key):
+    """
+    IPQS EMAIL VERIFICATION API
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    Returns: fraud_score, spam_trap_score, recent_abuse,
+             active (mailbox), disposable, honeypot, leaked
+
+    KEY INSIGHT:
+      active=False + recent_abuse=False = ABANDONED account → HIGH RISK
+      fraud_score high = risky regardless of breach history
+      spam_trap_score = direct spam trap signal (better than our heuristics)
+
+    Used ONLY on borderline emails (score 25-70) to preserve free credits.
+    Free tier: 1,000/month — sign up at ipqualityscore.com
+    """
+    if not key: return {"checked":False}
+    try:
+        url  = f"https://ipqualityscore.com/api/json/email/{key}/{email}"
+        params={"timeout":7,"suggest_domain":"false","abuse_strictness":1}
+        r=requests.get(url,params=params,timeout=8)
+        if r.status_code==200:
+            d=r.json()
+            if not d.get("success",False):
+                return {"checked":False,"error":d.get("message","")}
+
+            fraud   = d.get("fraud_score",0)
+            trap    = d.get("spam_trap_score",0)
+            abuse   = d.get("recent_abuse",False)
+            active  = d.get("valid",False) and not d.get("disposable",False)
+            leaked  = d.get("leaked",False)
+            leaked_date = d.get("first_seen","")
+
+            # Score impact based on IPQS signals
+            impact = 0
+            detail_parts = []
+
+            if trap > 0.5:
+                impact += 60
+                detail_parts.append(f"SPAM TRAP detected (score:{trap:.2f})")
+            if fraud > 75:
+                impact += 40
+                detail_parts.append(f"High fraud score:{fraud}")
+            elif fraud > 50:
+                impact += 20
+                detail_parts.append(f"Medium fraud score:{fraud}")
+            elif fraud < 25:
+                impact -= 10
+                detail_parts.append(f"Low fraud score:{fraud}")
+
+            if abuse:
+                impact += 30
+                detail_parts.append("Recent abusive behavior detected")
+            if not active:
+                impact += 25
+                detail_parts.append("Mailbox not active")
+            if active and not abuse:
+                impact -= 15
+                detail_parts.append("Mailbox active, no recent abuse")
+            if leaked and leaked_date:
+                detail_parts.append(f"Leaked in breach ({leaked_date})")
+
+            return {
+                "checked":      True,
+                "fraud_score":  fraud,
+                "spam_trap":    trap > 0.5,
+                "recent_abuse": abuse,
+                "active":       active,
+                "leaked":       leaked,
+                "impact":       impact,
+                "detail":       " | ".join(detail_parts) or "Checked — no issues",
+            }
+    except Exception as e:
+        return {"checked":False,"error":str(e)}
+    return {"checked":False}
 
 
 # ─────────────────────────────────────────────────────────────
-#  CORE VALIDATION ENGINE
+#  LOCAL VALIDATION (Phase 1 — instant, no API)
 # ─────────────────────────────────────────────────────────────
+def local_validate(email, local, domain, check_mx_flag):
+    r={"score":0,"reasons":[],"is_spam_trap":False,"is_disposable":False,
+       "is_typo":False,"typo_fix":"","is_role":False,
+       "username_risk":"LOW","entropy":0.0,"num_density":0.0,"vowel_ratio":0.0,
+       "has_mx":True,"terminal":False}
 
-def validate_email(row_data: dict, config: dict) -> dict:
-    """
-    Full validation pipeline for one email.
-    
-    row_data keys:
-        email           : the email address (required)
-        last_engaged    : last open/click date string YYYY-MM-DD (optional)
-        date_added      : when added to list YYYY-MM-DD (optional)
-    
-    config keys:
-        check_mx        : bool
-        engagement_col  : column name for engagement date
-        added_col       : column name for date added
-        inactivity_days : threshold for HIGH risk (default 365)
-    
-    RETURNS dict with all validation fields
-    """
-    email = str(row_data.get("email", "")).strip().lower()
-    
-    result = {
-        "email":            email,
-        "status":           "UNKNOWN",
-        "risk_level":       "UNKNOWN",
-        "risk_score":       0,
-        "action":           "",
-        "is_valid_syntax":  False,
-        "is_typo":          False,
-        "typo_suggestion":  "",
-        "is_disposable":    False,
-        "is_spam_trap":     False,
-        "is_role_based":    False,
-        "is_big_provider":  False,
-        "provider":         "",
-        "username_risk":    "LOW",
-        "engagement_risk":  "UNKNOWN",
-        "days_inactive":    None,
-        "reasons":          [],
+    # Spam trap
+    if domain in TRAPS:
+        r.update({"score":100,"is_spam_trap":True,"terminal":True,
+                  "reasons":[f"'{domain}' is a known spam trap domain"]})
+        return r
+    for td in TRAPS:
+        if domain.endswith("."+td):
+            r.update({"score":100,"is_spam_trap":True,"terminal":True,
+                      "reasons":[f"Sub-domain of spam trap: {td}"]})
+            return r
+
+    # Disposable
+    if domain in DISPOSABLE:
+        r["is_disposable"]=True; r["score"]+=70
+        r["reasons"].append(f"'{domain}' is disposable/throwaway provider")
+
+    # Big provider flag (must check before typo)
+    is_big = domain in BIG
+
+    # Typo (only for non-big providers)
+    if not is_big:
+        if domain in TYPOS:
+            r["is_typo"]=True; r["typo_fix"]=TYPOS[domain]
+            r["score"]+=65
+            r["reasons"].append(f"Typo: '{domain}' → '{TYPOS[domain]}'?")
+        else:
+            for p in BIG:
+                sim=SequenceMatcher(None,domain,p).ratio()
+                if 0.82<=sim<1.0:
+                    r["is_typo"]=True; r["typo_fix"]=p
+                    r["score"]+=55
+                    r["reasons"].append(f"'{domain}' looks like typo of '{p}' ({int(sim*100)}%)")
+                    break
+
+    # Role
+    base=local.split("+")[0]
+    if base in ROLES:
+        r["is_role"]=True; r["score"]+=25
+        r["reasons"].append(f"Role address '{base}@' — not personal inbox")
+
+    # Entropy analysis
+    clean=local.replace(".","").replace("_","").replace("-","").replace("+","")
+    ent=entropy(clean); nd=num_density(clean); vr=vowel_ratio(clean)
+    r.update({"entropy":round(ent,3),"num_density":round(nd,3),"vowel_ratio":round(vr,3)})
+
+    es=0
+    if PAT_SUSP.search(local):
+        es+=40; r["reasons"].append(f"Suspicious keyword in username '{local}'")
+    if ent>=3.5:
+        es+=20; r["reasons"].append(f"High randomness (entropy {ent:.2f}) — auto-generated?")
+    elif ent>=3.0:
+        es+=10
+    if nd>=0.6:
+        es+=20; r["reasons"].append(f"Username {int(nd*100)}% digits — bot pattern")
+    elif nd>=0.4:
+        es+=10
+    if vr==0 and len(clean)>=4:
+        es+=15; r["reasons"].append("No vowels — not a real name")
+    if clean.isdigit():
+        es+=25; r["reasons"].append("Username is purely numeric")
+    if len(local)<=2:
+        es+=20; r["reasons"].append(f"Username too short ({len(local)} chars)")
+    if len(local)>30:
+        es+=15; r["reasons"].append(f"Username very long ({len(local)} chars)")
+    if es>=40: r["username_risk"]="HIGH"
+    elif es>=15: r["username_risk"]="MEDIUM"
+    r["score"]+=es
+
+    # MX
+    if not is_big and check_mx_flag:
+        ok=has_mx(domain); r["has_mx"]=ok
+        if not ok:
+            r["score"]+=90; r["reasons"].append(f"No MX record — '{domain}' cannot receive email")
+
+    r["score"]=min(r["score"],100)
+    return r
+
+
+# ─────────────────────────────────────────────────────────────
+#  MASTER VALIDATE — FULL PIPELINE
+# ─────────────────────────────────────────────────────────────
+def validate(email: str, cfg: dict) -> dict:
+    email = str(email).strip().lower()
+    out = {
+        "email": email,
+        "risk_score": 0, "risk_level": "UNKNOWN",
+        "action": "", "status": "",
+        # Phase 1 flags
+        "is_spam_trap":False,"is_disposable":False,
+        "is_typo":False,"typo_fix":"","is_role":False,
+        "username_risk":"LOW","entropy":0.0,
+        "num_density":0.0,"vowel_ratio":0.0,"has_mx":True,
+        # Footprint
+        "fp_count":0,"fp_impact":0,
+        "last_active_date":None,"last_active_source":"",
+        "days_inactive":None,"activity_label":"",
+        "github_found":False,"reddit_found":False,
+        "gravatar_found":False,"hibp_count":0,
+        "email_age_est":None,
+        # IPQS
+        "ipqs_checked":False,"ipqs_fraud":None,
+        "ipqs_spam_trap":False,"ipqs_abuse":False,"ipqs_active":None,
+        # All reasons
+        "reasons":[], "footprint_log":[],
     }
 
-    score = 0
-
-    # ── LAYER 1: EMPTY CHECK ──────────────────────────────────
+    # Syntax
     if not email or "@" not in email:
-        result["status"]    = "INVALID"
-        result["risk_score"]= 100
-        result["risk_level"]= "CRITICAL"
-        result["reasons"]   = ["Empty or missing email"]
-        result["action"]    = "REMOVE"
-        return result
+        out.update({"status":"INVALID","risk_score":100,"risk_level":"CRITICAL",
+                    "action":"REMOVE","reasons":["Empty/invalid email"]})
+        return out
+    local,domain=email.split("@",1)
+    if not EMAIL_RE.match(email) or len(email)>254 or len(local)>64:
+        out.update({"status":"INVALID_SYNTAX","risk_score":100,"risk_level":"CRITICAL",
+                    "action":"REMOVE","reasons":["Bad syntax"]})
+        return out
 
-    local, domain = email.split("@", 1)
+    is_big = domain in BIG
 
-    # ── LAYER 2: SYNTAX ───────────────────────────────────────
-    if not EMAIL_REGEX.match(email):
-        result["status"]      = "INVALID_SYNTAX"
-        result["risk_score"]  = 100
-        result["risk_level"]  = "CRITICAL"
-        result["reasons"]     = ["Invalid email format/syntax"]
-        result["action"]      = "REMOVE"
-        return result
+    # ── PHASE 1: LOCAL VALIDATION ──────────────────────────────
+    lv = local_validate(email,local,domain,cfg.get("check_mx",True))
+    out.update({k:lv[k] for k in ["is_spam_trap","is_disposable","is_typo","typo_fix",
+                                    "is_role","username_risk","entropy",
+                                    "num_density","vowel_ratio","has_mx"]})
+    out["reasons"] += lv["reasons"]
 
-    result["is_valid_syntax"] = True
+    if lv["terminal"]:  # Spam trap — stop immediately
+        out.update({"risk_score":100,"risk_level":"CRITICAL",
+                    "action":"REMOVE IMMEDIATELY","status":"SPAM TRAP"})
+        return out
 
-    # ── LAYER 3: SPAM TRAP DOMAIN ─────────────────────────────
-    if domain in SPAM_TRAP_DOMAINS:
-        result["is_spam_trap"] = True
-        result["status"]       = "SPAM_TRAP"
-        result["risk_score"]   = 100
-        result["risk_level"]   = "CRITICAL"
-        result["reasons"]      = [f"'{domain}' is a known spam trap domain"]
-        result["action"]       = "REMOVE IMMEDIATELY"
-        return result
+    base_score = lv["score"]
 
-    # ── LAYER 4: TYPO DETECTION ───────────────────────────────
-    if domain in TYPO_MAP:
-        result["is_typo"]        = True
-        result["typo_suggestion"]= TYPO_MAP[domain]
-        score += 65
-        result["reasons"].append(
-            f"Typo domain '{domain}' → did you mean '{TYPO_MAP[domain]}'?"
-        )
-    else:
-        # Fuzzy match check
-        for provider in BIG_PROVIDERS:
-            sim = SequenceMatcher(None, domain, provider).ratio()
-            if 0.82 <= sim < 1.0:
-                result["is_typo"]         = True
-                result["typo_suggestion"] = provider
-                score += 55
-                result["reasons"].append(
-                    f"'{domain}' looks like a typo of '{provider}' ({int(sim*100)}% match)"
-                )
-                break
+    # ── PHASE 2: FOOTPRINT CHECKS (big providers only) ────────
+    fp_impact  = 0
+    fp_count   = 0
+    fp_log     = []
+    best_last_active = None
+    best_days        = None
+    best_source      = ""
 
-    # ── LAYER 5: DISPOSABLE ───────────────────────────────────
-    if domain in DISPOSABLE_DOMAINS:
-        result["is_disposable"] = True
-        score += 70
-        result["reasons"].append(f"'{domain}' is a disposable/temporary email provider")
-
-    # ── LAYER 6: ROLE-BASED ───────────────────────────────────
-    base_local = local.split("+")[0]
-    if base_local in ROLE_PREFIXES:
-        result["is_role_based"] = True
-        score += 25
-        result["reasons"].append(f"Role-based address ('{base_local}') — goes to department not person")
-
-    # ── LAYER 7: BIG PROVIDER FLAG ───────────────────────────
-    if domain in BIG_PROVIDERS:
-        result["is_big_provider"] = True
-        result["provider"]        = domain
-
-    # ── LAYER 8: USERNAME PATTERN ANALYSIS ───────────────────
-    #    This is the KEY check for Gmail/Yahoo/Hotmail
-    #    since SMTP doesn't work on them
-    clean_local = local.replace(".", "").replace("_", "").replace("-", "")
-    username_score = 0
-
-    if PAT_SUSPICIOUS.search(local):
-        username_score += 40
-        result["reasons"].append(f"Suspicious keyword in username: '{local}'")
-
-    if PAT_RANDOM.match(clean_local) and len(clean_local) >= 5:
-        username_score += 30
-        result["reasons"].append(f"Username looks randomly generated (no vowels pattern)")
-
-    if PAT_LONG_NUM.match(local):
-        username_score += 20
-        result["reasons"].append(f"Auto-generated pattern: name + many numbers")
-
-    if PAT_PURE_NUM.match(local):
-        username_score += 25
-        result["reasons"].append(f"Username is purely numeric — unusual for real person")
-
-    if len(local) <= 2:
-        username_score += 20
-        result["reasons"].append(f"Username too short ({len(local)} chars)")
-
-    if len(local) > 30:
-        username_score += 15
-        result["reasons"].append(f"Username unusually long ({len(local)} chars)")
-
-    if username_score >= 40:
-        result["username_risk"] = "HIGH"
-    elif username_score >= 20:
-        result["username_risk"] = "MEDIUM"
-
-    score += username_score
-
-    # ── LAYER 9: MX RECORD CHECK (skip big providers — always valid) ──
-    if not result["is_big_provider"] and config.get("check_mx", True):
-        if not check_mx(domain):
-            score += 90
-            result["reasons"].append(f"No MX record — domain cannot receive email")
-            result["status"] = "NO_MX"
-
-    # ── LAYER 10: ENGAGEMENT / INACTIVITY (KEY for Gmail traps) ──
-    engaged_col = config.get("engagement_col")
-    last_engaged_raw = row_data.get(engaged_col) if engaged_col else None
-    threshold   = config.get("inactivity_days", 365)
-
-    if last_engaged_raw and str(last_engaged_raw).strip() not in ("", "nan", "None", "NaT"):
-        try:
-            last_engaged = pd.to_datetime(str(last_engaged_raw))
-            days = (datetime.now() - last_engaged.to_pydatetime()).days
-            result["days_inactive"] = days
-
-            if days < 90:
-                result["engagement_risk"] = "LOW"
-            elif days < 180:
-                result["engagement_risk"] = "MEDIUM"
-                score += 20
-                result["reasons"].append(f"No engagement for {days} days")
-            elif days < threshold:
-                result["engagement_risk"] = "HIGH"
-                score += 40
-                result["reasons"].append(f"No engagement for {days} days — HIGH recycled trap risk")
+    if is_big:
+        # 2a — Gravatar (always free)
+        if cfg.get("gravatar"):
+            g = fp_gravatar(email)
+            out["gravatar_found"] = g["found"]
+            if g["found"]:
+                fp_count+=1; fp_impact+=g["impact"]
+                fp_log.append(f"✅ Gravatar: {g['detail']}")
             else:
-                result["engagement_risk"] = "CRITICAL"
-                score += 65
-                result["reasons"].append(
-                    f"No engagement for {days} days ({days//365}+ year) — "
-                    f"likely inactive/recycled spam trap"
-                )
-        except Exception:
-            result["engagement_risk"] = "UNKNOWN"
-            score += 15
+                fp_log.append(f"❌ Gravatar: {g['detail']}")
+
+        # 2b — GitHub (free with token)
+        if cfg.get("github"):
+            gh = fp_github(local, cfg.get("github_token",""))
+            out["github_found"] = gh["found"]
+            if gh["found"]:
+                fp_count+=1; fp_impact+=gh["impact"]
+                fp_log.append(f"✅ GitHub: {gh['detail']}")
+                d = gh.get("days_inactive")
+                if d is not None and (best_days is None or d < best_days):
+                    best_days = d
+                    best_last_active = gh.get("last_active")
+                    best_source = "GitHub"
+            else:
+                fp_log.append(f"❌ GitHub: {gh['detail']}")
+
+        # 2c — Reddit (free)
+        if cfg.get("reddit"):
+            rd = fp_reddit(local)
+            out["reddit_found"] = rd["found"]
+            if rd["found"]:
+                fp_count+=1; fp_impact+=rd["impact"]
+                fp_log.append(f"✅ Reddit: {rd['detail']}")
+                d = rd.get("days_inactive")
+                if d is not None and (best_days is None or d < best_days):
+                    best_days = d
+                    best_last_active = rd.get("last_active")
+                    best_source = "Reddit"
+            else:
+                fp_log.append(f"❌ Reddit: {rd['detail']}")
+
+        # 2d — HIBP (fixed recency logic)
+        if cfg.get("hibp_key"):
+            hb = fp_hibp(email, cfg["hibp_key"])
+            out["hibp_count"] = hb.get("breach_count",0)
+            out["email_age_est"] = hb.get("email_age_est")
+            if hb["found"]:
+                fp_count+=1; fp_impact+=hb["impact"]
+                fp_log.append(f"✅ HIBP: {hb['detail']}")
+                # Only use HIBP date if we have nothing better
+                if best_days is None:
+                    best_last_active = hb.get("last_active")
+                    best_source      = "HIBP (estimated)"
+            else:
+                fp_impact += hb.get("impact",0)   # +8 if never seen
+                fp_log.append(f"❌ HIBP: {hb['detail']}")
+
+    out.update({
+        "fp_count":fp_count,"fp_impact":fp_impact,
+        "last_active_date":best_last_active,
+        "last_active_source":best_source,
+        "days_inactive":best_days,
+        "footprint_log":fp_log,
+    })
+
+    if best_days is not None:
+        _,out["activity_label"] = temporal_risk(best_days)
+    elif fp_count>0:
+        out["activity_label"]="Active (no exact date)"
     else:
-        result["engagement_risk"] = "UNKNOWN"
-        score += 10  # Small penalty for missing data
+        out["activity_label"]="No footprint found"
 
-    # ── LAYER 11: LIST AGE ────────────────────────────────────
-    added_col     = config.get("added_col")
-    added_raw     = row_data.get(added_col) if added_col else None
+    # ── PHASE 3: IPQS (borderline only — saves free credits) ──
+    #
+    # SMART USAGE: Only call IPQS on emails with score 25-75.
+    # Emails below 25 are already safe.
+    # Emails above 75 are already critical.
+    # Only borderline ones need IPQS to decide.
+    #
+    pre_ipqs_score = min(max(base_score + fp_impact, 0), 100)
+    ipqs_impact    = 0
 
-    if added_raw and str(added_raw).strip() not in ("", "nan", "None", "NaT"):
-        try:
-            added_date = pd.to_datetime(str(added_raw))
-            age_days   = (datetime.now() - added_date.to_pydatetime()).days
+    if cfg.get("ipqs_key") and 20 <= pre_ipqs_score <= 75:
+        iq = fp_ipqs(email, cfg["ipqs_key"])
+        if iq.get("checked"):
+            out.update({
+                "ipqs_checked":   True,
+                "ipqs_fraud":     iq.get("fraud_score"),
+                "ipqs_spam_trap": iq.get("spam_trap",False),
+                "ipqs_abuse":     iq.get("recent_abuse",False),
+                "ipqs_active":    iq.get("active"),
+            })
+            ipqs_impact = iq.get("impact",0)
+            fp_log.append(f"🔍 IPQS: {iq.get('detail','')}")
 
-            if age_days > 730:    # > 2 years
-                score += 35
-                result["reasons"].append(f"Record is {age_days//365}+ years old — high inactivity risk")
-            elif age_days > 365:  # 1-2 years
-                score += 15
-                result["reasons"].append(f"Record is {age_days} days old — moderate age risk")
-        except Exception:
-            pass
+            # IPQS spam trap = CRITICAL regardless of other signals
+            if iq.get("spam_trap"):
+                out.update({"risk_score":100,"risk_level":"CRITICAL",
+                            "action":"REMOVE IMMEDIATELY","status":"SPAM TRAP (IPQS)",
+                            "reasons":out["reasons"]+["IPQS confirmed spam trap"],
+                            "footprint_log":fp_log})
+                return out
 
-    # ── FINAL SCORING & CLASSIFICATION ───────────────────────
-    score = min(score, 100)
-    result["risk_score"] = score
+    # ── FINAL SCORE ───────────────────────────────────────────
+    final = max(0, min(base_score + fp_impact + ipqs_impact, 100))
+    out["risk_score"] = final
 
-    if result["is_spam_trap"] or result["is_typo"] or result["is_disposable"]:
-        if score >= 65:
-            result["risk_level"] = "CRITICAL"
-            result["status"]     = result.get("status", "RISKY")
-            result["action"]     = "REMOVE"
-        else:
-            result["risk_level"] = "HIGH"
-            result["action"]     = "REVIEW"
-    elif score <= 20:
-        result["risk_level"] = "LOW"
-        result["status"]     = "SAFE"
-        result["action"]     = "KEEP"
-    elif score <= 40:
-        result["risk_level"] = "MEDIUM"
-        result["status"]     = "MEDIUM RISK"
-        result["action"]     = "MONITOR"
-    elif score <= 65:
-        result["risk_level"] = "HIGH"
-        result["status"]     = "HIGH RISK"
-        result["action"]     = "RE-ENGAGE FIRST"
+    if final<=20:
+        out.update({"risk_level":"LOW",     "status":"SAFE",        "action":"KEEP"})
+    elif final<=40:
+        out.update({"risk_level":"MEDIUM",  "status":"MEDIUM RISK", "action":"MONITOR"})
+    elif final<=65:
+        out.update({"risk_level":"HIGH",    "status":"HIGH RISK",   "action":"RE-ENGAGE"})
     else:
-        result["risk_level"] = "CRITICAL"
-        result["status"]     = "CRITICAL RISK"
-        result["action"]     = "REMOVE"
+        out.update({"risk_level":"CRITICAL","status":"CRITICAL",    "action":"REMOVE"})
 
-    return result
+    if not out["reasons"]: out["reasons"]=["No issues found"]
+    return out
 
 
 # ─────────────────────────────────────────────────────────────
-#  STREAMLIT UI
+#  UI
 # ─────────────────────────────────────────────────────────────
-
 def main():
-
-    # ── HEADER ────────────────────────────────────────────────
     st.markdown("""
-    <div class="main-header">
-        <h1>🧹 Email Sanitization System</h1>
-        <p>Spam Trap Detection · Bulk Email Hygiene · Risk Scoring</p>
+    <div class="hdr">
+      <div class="hdr-title">🧹 Email Sanitization System
+        <span class="badge b-green">v5.0</span>
+      </div>
+      <div class="hdr-sub">Temporal Scoring · IPQS Integration · Last-Active Detection · Fixed HIBP Logic</div>
+      <div style="margin-top:.7rem">
+        <span class="badge b-blue">Gravatar</span>
+        <span class="badge b-blue">GitHub updated_at</span>
+        <span class="badge b-blue">Reddit last-post</span>
+        <span class="badge b-blue">HIBP (recency fixed)</span>
+        <span class="badge b-orange">IPQS (smart)</span>
+      </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── SIDEBAR CONFIG ─────────────────────────────────────────
     with st.sidebar:
         st.markdown("### ⚙️ Settings")
+        check_mx  = st.toggle("MX Record Check",value=True)
         st.markdown("---")
-
-        check_mx_records = st.toggle("Check MX Records (DNS)", value=True,
-            help="Verify if domain has a mail server. Skip for faster processing.")
-
-        inactivity_threshold = st.slider(
-            "Inactivity Threshold (days)",
-            min_value=90, max_value=730, value=365, step=30,
-            help="Emails not engaged beyond this many days = CRITICAL risk"
-        )
-
+        st.markdown("### 🌐 Free Footprint")
+        use_grav  = st.toggle("🖼️ Gravatar",value=True)
+        use_gh    = st.toggle("💻 GitHub",value=True)
+        gh_token  = st.text_input("GitHub Token (optional)",type="password",
+                                   placeholder="5000 req/hr with token vs 60 without")
+        use_rd    = st.toggle("🤖 Reddit",value=True)
         st.markdown("---")
-        st.markdown("### 📊 Risk Level Guide")
+        st.markdown("### 🔑 API Keys")
+        hibp_key  = st.text_input("HIBP Key (free)",type="password",
+                                   placeholder="haveibeenpwned.com/API/Key")
+        ipqs_key  = st.text_input("IPQS Key (1000 free/mo)",type="password",
+                                   placeholder="ipqualityscore.com → Create Account")
+        if hibp_key:  st.success("✅ HIBP active — recency scoring enabled")
+        if ipqs_key:  st.success("✅ IPQS active — used on borderline emails only")
+        st.markdown("---")
+        st.markdown("### ⏱️ Activity Scoring")
         st.markdown("""
-        🟢 **LOW (0-20)** — Safe to send  
-        🟡 **MEDIUM (21-40)** — Monitor  
-        🟠 **HIGH (41-65)** — Re-engage first  
-        🔴 **CRITICAL (66+)** — Remove immediately
+        | Last Active | Score |
+        |---|---|
+        | < 90 days | **-25** |
+        | 90-180 days | **-15** |
+        | 180-365 days | **-5** |
+        | 1-2 years | **+10** |
+        | 2-4 years | **+20** |
+        | 4+ years | **+30** |
+        | Unknown | **+8** |
         """)
+        st.markdown("**IPQS used only on score 20-75** — preserves free credits")
 
-        st.markdown("---")
-        st.markdown("### ⚠️ Gmail/Yahoo Reality")
-        st.markdown("""
-        For big providers:
-        - SMTP check won't work
-        - Detection is **behavioral**
-        - Engagement data = most important signal
-        - No system can 100% detect Gmail traps
-        """)
+    tab1,tab2,tab3 = st.tabs(["📤 Upload","📊 Results","📖 How It Works"])
 
-    # ── TABS ──────────────────────────────────────────────────
-    tab1, tab2, tab3 = st.tabs(["📤 Upload & Process", "📊 Results & Download", "📖 Methodology"])
-
-    # ════════════════════════════════════════════════════════
-    # TAB 1 — UPLOAD
-    # ════════════════════════════════════════════════════════
     with tab1:
-        st.markdown("### Step 1 — Upload Your Email List")
-        st.markdown("""
-        <div class="info-box">
-        Upload a <b>CSV or Excel (.xlsx)</b> file.<br>
-        Your file must have at least one column with email addresses.<br>
-        Optional: include <b>last engagement date</b> and <b>date added</b> columns for better Gmail trap detection.
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown("### Upload Email List")
+        st.markdown("""<div class="info">
+        📌 <b>Email column only required.</b>
+        v5 uses temporal scoring — the KEY question is not "did this email exist?"
+        but "when was it last active?" Old activity = higher risk, recent = lower risk.
+        </div>""", unsafe_allow_html=True)
 
-        uploaded_file = st.file_uploader(
-            "Upload CSV or Excel file",
-            type=["csv", "xlsx", "xls"],
-            help="Max recommended: 50,000 rows"
-        )
-
-        if uploaded_file:
-            # Load file
+        uploaded = st.file_uploader("Upload CSV or Excel",type=["csv","xlsx","xls"])
+        if uploaded:
             try:
-                if uploaded_file.name.endswith(".csv"):
-                    df = pd.read_csv(uploaded_file, dtype=str)
-                else:
-                    df = pd.read_excel(uploaded_file, dtype=str)
+                df = pd.read_csv(uploaded,dtype=str) if uploaded.name.endswith(".csv") \
+                     else pd.read_excel(uploaded,dtype=str)
                 df = df.fillna("")
-                st.success(f"✅ Loaded **{len(df):,}** rows, **{len(df.columns)}** columns")
-                st.dataframe(df.head(5), use_container_width=True)
+                st.success(f"✅ Loaded **{len(df):,} rows**")
+                st.dataframe(df.head(5),use_container_width=True)
             except Exception as e:
-                st.error(f"❌ Could not read file: {e}")
-                return
+                st.error(f"❌ {e}"); return
 
-            st.markdown("### Step 2 — Map Your Columns")
-            col1, col2, col3 = st.columns(3)
+            email_cols=[c for c in df.columns if any(k in c.lower() for k in ["email","mail"])]
+            def_i=list(df.columns).index(email_cols[0]) if email_cols else 0
+            ec=st.selectbox("Email Column",list(df.columns),index=def_i)
 
-            cols = ["(none)"] + list(df.columns)
+            active_apis=[]
+            if use_grav:  active_apis.append("Gravatar(free)")
+            if use_gh:    active_apis.append("GitHub(free)")
+            if use_rd:    active_apis.append("Reddit(free)")
+            if hibp_key:  active_apis.append("HIBP(key)")
+            if ipqs_key:  active_apis.append("IPQS(borderline only)")
 
-            with col1:
-                email_col = st.selectbox(
-                    "📧 Email Column *",
-                    options=list(df.columns),
-                    index=0,
-                    help="Required — the column containing email addresses"
-                )
-            with col2:
-                engaged_col = st.selectbox(
-                    "📅 Last Engagement Date",
-                    options=cols,
-                    index=0,
-                    help="Date the person last opened/clicked. Most important for Gmail trap detection."
-                )
-            with col3:
-                added_col = st.selectbox(
-                    "📆 Date Added to List",
-                    options=cols,
-                    index=0,
-                    help="When this email was added to your database."
-                )
+            if active_apis:
+                st.markdown(f"""<div class="info">
+                🌐 Active: <b>{' · '.join(active_apis)}</b><br>
+                ⚡ IPQS will only run on borderline emails (score 20-75) to save your 1,000 free credits.
+                </div>""", unsafe_allow_html=True)
 
-            engaged_col = None if engaged_col == "(none)" else engaged_col
-            added_col   = None if added_col   == "(none)" else added_col
+            if st.button("🚀 Run Sanitization",use_container_width=True,type="primary"):
+                cfg={"check_mx":check_mx,"gravatar":use_grav,"github":use_gh,
+                     "github_token":gh_token,"reddit":use_rd,
+                     "hibp_key":hibp_key,"ipqs_key":ipqs_key}
 
-            if not engaged_col:
-                st.markdown("""
-                <div class="warn-box">
-                ⚠️ <b>No engagement date column mapped.</b><br>
-                For Gmail/Yahoo/Hotmail (95% of your data), engagement date is the
-                <b>most critical signal</b> for detecting recycled spam traps.
-                If you have this data in your ESP (Mailchimp/SendGrid etc.), add it to your file.
-                </div>
-                """, unsafe_allow_html=True)
+                ori=len(df)
+                df["_n"]=df[ec].str.strip().str.lower()
+                df=df.drop_duplicates(subset=["_n"])
+                dupes=ori-len(df)
+                total=len(df)
+                results=[]
+                prog=st.progress(0); status=st.empty()
+                ipqs_used=0; fp_confirmed=0
 
-            st.markdown("### Step 3 — Start Processing")
-            if st.button("🚀 Run Email Sanitization", type="primary", use_container_width=True):
-
-                config = {
-                    "check_mx":        check_mx_records,
-                    "inactivity_days": inactivity_threshold,
-                    "engagement_col":  engaged_col,
-                    "added_col":       added_col,
-                }
-
-                # ── DEDUP FIRST ───────────────────────────────
-                original_count = len(df)
-                df["_email_norm"] = df[email_col].str.strip().str.lower()
-                df = df.drop_duplicates(subset=["_email_norm"])
-                dupes_removed  = original_count - len(df)
-
-                # ── PROCESS ───────────────────────────────────
-                progress_bar = st.progress(0)
-                status_text  = st.empty()
-                results      = []
-                total        = len(df)
-
-                for i, (_, row) in enumerate(df.iterrows()):
-                    row_data = {"email": row[email_col]}
-                    if engaged_col: row_data[engaged_col] = row.get(engaged_col, "")
-                    if added_col:   row_data[added_col]   = row.get(added_col, "")
-
-                    r = validate_email(row_data, config)
-
-                    # Carry original columns too
-                    for col in df.columns:
-                        if col not in ("_email_norm",) and col not in r:
-                            r[f"orig_{col}"] = row.get(col, "")
-
+                for i,(_,row) in enumerate(df.iterrows()):
+                    r=validate(str(row[ec]),cfg)
+                    if r.get("fp_count",0)>=2: fp_confirmed+=1
+                    if r.get("ipqs_checked"):   ipqs_used+=1
                     results.append(r)
+                    if i%5==0 or i==total-1:
+                        p=(i+1)/total; prog.progress(p)
+                        status.markdown(
+                            f"**{i+1:,}/{total:,}** · "
+                            f"FP confirmed: **{fp_confirmed}** · "
+                            f"IPQS used: **{ipqs_used}** · "
+                            f"`{int(p*100)}%`")
 
-                    if i % 50 == 0 or i == total - 1:
-                        pct = (i + 1) / total
-                        progress_bar.progress(pct)
-                        status_text.text(
-                            f"Processing {i+1:,} / {total:,} emails... "
-                            f"({int(pct*100)}%)"
-                        )
+                status.markdown(f"✅ Done! **{total:,}** processed. "
+                                f"IPQS credits used: **{ipqs_used}** of 1,000 free.")
 
-                status_text.text(f"✅ Done! Processed {total:,} emails.")
+                rdf=pd.DataFrame(results)
+                safe    =len(rdf[rdf["risk_level"]=="LOW"])
+                medium  =len(rdf[rdf["risk_level"]=="MEDIUM"])
+                high    =len(rdf[rdf["risk_level"]=="HIGH"])
+                critical=len(rdf[rdf["risk_level"]=="CRITICAL"])
+                traps   =int(rdf["is_spam_trap"].sum())+int(rdf["ipqs_spam_trap"].sum())
 
-                # ── BUILD RESULT DF ───────────────────────────
-                result_df = pd.DataFrame(results)
+                st.session_state.update({"rdf":rdf,"sum":{
+                    "total":total,"dupes":dupes,"safe":safe,"medium":medium,
+                    "high":high,"critical":critical,"traps":traps,
+                    "fp_confirmed":fp_confirmed,"ipqs_used":ipqs_used}})
 
-                # Summary counts
-                safe     = len(result_df[result_df["risk_level"] == "LOW"])
-                medium   = len(result_df[result_df["risk_level"] == "MEDIUM"])
-                high     = len(result_df[result_df["risk_level"] == "HIGH"])
-                critical = len(result_df[result_df["risk_level"] == "CRITICAL"])
-                traps    = len(result_df[result_df["is_spam_trap"] == True])
-                typos    = len(result_df[result_df["is_typo"] == True])
-                disposable = len(result_df[result_df["is_disposable"] == True])
-
-                st.session_state["result_df"]    = result_df
-                st.session_state["dupes_removed"]= dupes_removed
-                st.session_state["summary"] = {
-                    "total": total, "dupes": dupes_removed,
-                    "safe": safe, "medium": medium,
-                    "high": high, "critical": critical,
-                    "traps": traps, "typos": typos,
-                    "disposable": disposable,
-                }
-
-                # ── METRICS ───────────────────────────────────
                 st.markdown("---")
-                st.markdown("### 📊 Results Overview")
+                cols=st.columns(7)
+                for col,lbl,val,clr in zip(cols,
+                    ["Total","Dupes","✅ Safe","⚠️ Med","🔴 High","🚨 Critical","🔍 IPQS Used"],
+                    [total,dupes,safe,medium,high,critical,ipqs_used],
+                    ["#58a6ff","#8b949e","#3fb950","#d29922","#f0883e","#f85149","#bc8cff"]):
+                    pct=f"{val/total*100:.0f}%" if total else "0%"
+                    col.markdown(f"""<div class="card">
+                    <div style="font-family:'Space Mono';font-size:1.4rem;font-weight:700;color:{clr}">{val:,}</div>
+                    <div style="color:#8b949e;font-size:.7rem">{lbl}</div>
+                    <div style="color:{clr};font-size:.68rem">{pct}</div></div>""",
+                    unsafe_allow_html=True)
+                st.info("✅ Go to Results tab.")
 
-                c1, c2, c3, c4, c5 = st.columns(5)
-                with c1:
-                    st.metric("Total Processed", f"{total:,}")
-                with c2:
-                    st.metric("Duplicates Removed", f"{dupes_removed:,}")
-                with c3:
-                    st.metric("✅ Safe", f"{safe:,}",
-                              delta=f"{safe/total*100:.1f}%" if total else "0%")
-                with c4:
-                    st.metric("🔴 Critical", f"{critical:,}",
-                              delta=f"-{critical/total*100:.1f}% removed" if total else "0%",
-                              delta_color="inverse")
-                with c5:
-                    st.metric("🚨 Spam Traps", f"{traps:,}")
-
-                st.info("✅ Go to the **Results & Download** tab to see details and download files.")
-
-    # ════════════════════════════════════════════════════════
-    # TAB 2 — RESULTS
-    # ════════════════════════════════════════════════════════
     with tab2:
-        if "result_df" not in st.session_state:
-            st.info("👆 Upload and process a file first.")
-            return
+        if "rdf" not in st.session_state:
+            st.markdown('<div class="warn">⚠️ Upload and process first.</div>',
+                        unsafe_allow_html=True); return
 
-        result_df = st.session_state["result_df"]
-        summary   = st.session_state["summary"]
+        rdf=st.session_state["rdf"]; sm=st.session_state["sum"]
+        total=sm["total"]
 
-        st.markdown("### 📊 Full Results")
+        fc=st.columns(5)
+        for col,lbl,val,clr in zip(fc,
+            ["🚨 Traps","✅ Safe","🌐 FP≥2","🔍 IPQS","👥 Dupes"],
+            [sm["traps"],sm["safe"],sm["fp_confirmed"],sm["ipqs_used"],sm["dupes"]],
+            ["#f85149","#3fb950","#bc8cff","#f0883e","#8b949e"]):
+            col.markdown(f"""<div class="card">
+            <div style="font-family:'Space Mono';font-size:1.5rem;font-weight:700;color:{clr}">{val:,}</div>
+            <div style="color:#8b949e;font-size:.78rem;margin-top:3px">{lbl}</div></div>""",
+            unsafe_allow_html=True)
 
-        # Risk distribution bar
-        total = summary["total"]
-        if total > 0:
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                pct_safe     = summary["safe"] / total
-                pct_medium   = summary["medium"] / total
-                pct_high     = summary["high"] / total
-                pct_critical = summary["critical"] / total
-
-                st.markdown(f"""
-                **Risk Distribution**
-                """)
-                bar_html = f"""
-                <div style="display:flex; height:28px; border-radius:6px; overflow:hidden; margin:0.5rem 0 1rem 0">
-                  <div style="width:{pct_safe*100:.1f}%; background:#00d4aa" title="Safe {pct_safe*100:.1f}%"></div>
-                  <div style="width:{pct_medium*100:.1f}%; background:#ffd700" title="Medium {pct_medium*100:.1f}%"></div>
-                  <div style="width:{pct_high*100:.1f}%; background:#ff6b35" title="High {pct_high*100:.1f}%"></div>
-                  <div style="width:{pct_critical*100:.1f}%; background:#e94560" title="Critical {pct_critical*100:.1f}%"></div>
-                </div>
-                <div style="display:flex; gap:1.5rem; font-size:0.85rem">
-                  <span>🟢 Safe {pct_safe*100:.1f}%</span>
-                  <span>🟡 Medium {pct_medium*100:.1f}%</span>
-                  <span>🟠 High {pct_high*100:.1f}%</span>
-                  <span>🔴 Critical {pct_critical*100:.1f}%</span>
-                </div>
-                """
-                st.markdown(bar_html, unsafe_allow_html=True)
-
-            with col2:
-                st.markdown(f"""
-                | Flag | Count |
-                |------|-------|
-                | 🚨 Spam Traps | {summary['traps']:,} |
-                | ⌨️ Typo Domains | {summary['typos']:,} |
-                | ♻️ Disposable | {summary['disposable']:,} |
-                | 👥 Duplicates | {summary['dupes']:,} |
-                """)
-
-        # ── FILTER ────────────────────────────────────────────
         st.markdown("---")
-        filter_col1, filter_col2 = st.columns(2)
-        with filter_col1:
-            risk_filter = st.multiselect(
-                "Filter by Risk Level",
-                options=["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"],
-                default=["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"]
-            )
-        with filter_col2:
-            search = st.text_input("Search email", placeholder="Type to search...")
+        c1,c2=st.columns([2,2])
+        with c1:
+            rf=st.multiselect("Filter Risk",["LOW","MEDIUM","HIGH","CRITICAL","UNKNOWN"],
+                               default=["LOW","MEDIUM","HIGH","CRITICAL","UNKNOWN"])
+        with c2:
+            srch=st.text_input("Search email")
 
-        filtered = result_df[result_df["risk_level"].isin(risk_filter)]
-        if search:
-            filtered = filtered[filtered["email"].str.contains(search, na=False)]
+        show=["email","risk_level","risk_score","action","status",
+              "last_active_date","last_active_source","activity_label","days_inactive",
+              "email_age_est","fp_count","fp_impact",
+              "is_typo","typo_fix","is_disposable","is_spam_trap","is_role",
+              "username_risk","entropy","num_density","vowel_ratio",
+              "gravatar_found","github_found","reddit_found","hibp_count",
+              "ipqs_checked","ipqs_fraud","ipqs_spam_trap","ipqs_abuse","ipqs_active",
+              "reasons","footprint_log"]
+        show=[c for c in show if c in rdf.columns]
 
-        # Display columns
-        display_cols = ["email", "risk_level", "risk_score", "action",
-                        "status", "is_typo", "typo_suggestion",
-                        "is_disposable", "is_spam_trap", "is_role_based",
-                        "username_risk", "engagement_risk",
-                        "days_inactive", "reasons"]
-        display_cols = [c for c in display_cols if c in filtered.columns]
+        filt=rdf[rdf["risk_level"].isin(rf)].copy()
+        if srch: filt=filt[filt["email"].str.contains(srch,na=False)]
 
-        st.dataframe(
-            filtered[display_cols].head(500),
-            use_container_width=True,
-            height=400
-        )
-        if len(filtered) > 500:
-            st.caption(f"Showing 500 of {len(filtered):,} rows. Download for full data.")
+        def cr(v):
+            m={"LOW":"background:#0d2b12;color:#3fb950",
+               "MEDIUM":"background:#2b2100;color:#d29922",
+               "HIGH":"background:#2b1500;color:#f0883e",
+               "CRITICAL":"background:#2b0f0f;color:#f85149"}
+            return m.get(v,"")
 
-        # ── DOWNLOADS ─────────────────────────────────────────
+        disp=filt[show].head(1000).copy()
+        for c in ["reasons","footprint_log"]:
+            if c in disp.columns:
+                disp[c]=disp[c].apply(lambda x:" | ".join(x) if isinstance(x,list) else str(x))
+
+        st.dataframe(disp.style.applymap(cr,subset=["risk_level"]),
+                     use_container_width=True,height=420)
+
         st.markdown("---")
-        st.markdown("### 📥 Download Results")
+        st.markdown("### 📥 Download")
+        def tcsv(df):
+            d=df.copy()
+            for c in ["reasons","footprint_log"]:
+                if c in d.columns:
+                    d[c]=d[c].apply(lambda x:" | ".join(x) if isinstance(x,list) else str(x))
+            return d.to_csv(index=False).encode("utf-8")
 
-        d1, d2, d3, d4 = st.columns(4)
+        d1,d2,d3,d4,d5=st.columns(5)
+        for col,lbl,mask,fn in [
+            (d1,"📋 Full",rdf,"full_report.csv"),
+            (d2,f"✅ Safe({sm['safe']})",rdf[rdf["risk_level"]=="LOW"],"safe.csv"),
+            (d3,f"🟡 Mon({sm['medium']})",rdf[rdf["risk_level"]=="MEDIUM"],"monitor.csv"),
+            (d4,f"🔄 Re({sm['high']})",rdf[rdf["risk_level"]=="HIGH"],"reengage.csv"),
+            (d5,f"🚨 Rem({sm['critical']})",rdf[rdf["risk_level"]=="CRITICAL"],"remove.csv"),
+        ]:
+            col.download_button(lbl,data=tcsv(mask[show]),
+                                file_name=fn,mime="text/csv",use_container_width=True)
 
-        def to_csv_bytes(df):
-            return df.to_csv(index=False).encode("utf-8")
-
-        with d1:
-            full_csv = to_csv_bytes(result_df[display_cols])
-            st.download_button(
-                "📋 Full Report (CSV)",
-                data=full_csv,
-                file_name="full_report.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-
-        with d2:
-            safe_df  = result_df[result_df["risk_level"] == "LOW"][["email"]]
-            st.download_button(
-                f"✅ Safe Emails ({len(safe_df):,})",
-                data=to_csv_bytes(safe_df),
-                file_name="safe_emails.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-
-        with d3:
-            remove_df = result_df[result_df["risk_level"] == "CRITICAL"][["email", "risk_score", "reasons"]]
-            st.download_button(
-                f"🚨 Remove List ({len(remove_df):,})",
-                data=to_csv_bytes(remove_df),
-                file_name="remove_emails.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-
-        with d4:
-            reengage_df = result_df[result_df["risk_level"] == "HIGH"][["email", "days_inactive"]]
-            st.download_button(
-                f"🔄 Re-engage List ({len(reengage_df):,})",
-                data=to_csv_bytes(reengage_df),
-                file_name="reengage_emails.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-
-    # ════════════════════════════════════════════════════════
-    # TAB 3 — METHODOLOGY
-    # ════════════════════════════════════════════════════════
     with tab3:
-        st.markdown("### 📖 Spam Trap Detection Methodology")
+        st.markdown("### How v5 Fixes the xyz1234 Problem")
+        st.code("""
+xyz1234@gmail.com — THE PROBLEM CASE
 
+OLD logic (v3/v4):
+  HIBP: 6 breaches found → "real account" → score DOWN ❌
+  Result: xyz1234 gets LOW RISK — WRONG
+
+NEW logic (v5):
+  HIBP: 6 breaches, most recent = 2018 → 7 years ago
+  temporal_risk(2555 days) → +30 (almost certainly abandoned)
+  Username entropy: high randomness → +20
+  No vowels in username → +15
+  GitHub: not found → 0
+  Reddit: not found → 0
+  ─────────────────────────
+  Total: 65 → HIGH RISK ✅ CORRECT
+
+john.doe@gmail.com — THE REAL PERSON CASE
+
+  Username: clean name → 0
+  GitHub updated 45 days ago → temporal_risk(45) → -25
+  Gravatar found → -15
+  HIBP 2024 breach → temporal_risk(365) → -5
+  ─────────────────────────
+  Total: 0 - 25 - 15 - 5 = -45 → capped at 0 → LOW RISK ✅
+        """, language="text")
+
+        st.markdown("---")
+        st.markdown("### Smart IPQS Credit Usage")
         st.markdown("""
-        <div class="warn-box">
-        <b>⚠️ Important Reality:</b> No system in the world can 100% identify Gmail/Yahoo/Hotmail 
-        spam traps technically. Even paid services like ZeroBounce and NeverBounce use the same 
-        heuristic approach. The methodology below is industry-standard.
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown("""
-        ---
-        ### Why Gmail Spam Traps Are Different
-
-        | Provider | SMTP Check | DNS Check | Spam Trap Detection |
-        |---|---|---|---|
-        | `spamtrap.ro` | ✅ Works | ✅ Works | ✅ Easy — it's in our blacklist |
-        | `mailinator.com` | ✅ Works | ✅ Works | ✅ Easy — disposable list |
-        | **`gmail.com`** | ❌ Always 250 | ✅ Always valid | ❌ **Must use behavioral signals** |
-        | **`yahoo.com`** | ❌ Always 250 | ✅ Always valid | ❌ **Must use behavioral signals** |
-        | **`hotmail.com`** | ❌ Always 250 | ✅ Always valid | ❌ **Must use behavioral signals** |
-
-        ---
-        ### The 11-Layer Detection Pipeline
-
-        | Layer | Check | What It Catches | Risk Added |
-        |---|---|---|---|
-        | 1 | Empty/Missing | Blank cells | 100 |
-        | 2 | Syntax | Bad format (no @, double dots) | 100 |
-        | 3 | Spam Trap DB | Known trap domains | 100 |
-        | 4 | Typo Detection | gmial.com → gmail.com | +65 |
-        | 5 | Disposable | mailinator, yopmail, etc. | +70 |
-        | 6 | Role-Based | admin@, info@, noreply@ | +25 |
-        | 7 | Big Provider Flag | gmail/yahoo/hotmail tagged | info |
-        | 8 | Username Pattern | xk39pl22@ vs john.doe@ | +10 to +40 |
-        | 9 | MX Record | Does domain have mail server? | +90 |
-        | 10 | **Engagement** | **Days since last open/click** | **+20 to +65** |
-        | 11 | **List Age** | **How old is this record?** | **+15 to +35** |
-
-        ---
-        ### Risk Score Formula
-
-        ```
-        RiskScore = Syntax + SpamTrap + Typo + Disposable + RoleBased 
-                  + UsernamePattern + MXRecord + Engagement + ListAge
-        
-        Final = min(RiskScore, 100)
-        ```
-
-        | Score | Risk Level | Action |
+        | Email Score | IPQS Called? | Why |
         |---|---|---|
-        | 0 – 20 | 🟢 LOW | Keep — safe to send |
-        | 21 – 40 | 🟡 MEDIUM | Monitor bounce/complaint rates |
-        | 41 – 65 | 🟠 HIGH | Send re-engagement email first |
-        | 66 – 100 | 🔴 CRITICAL | Remove immediately |
+        | 0 – 19 | ❌ No | Already safe — don't waste credits |
+        | 20 – 75 | ✅ Yes | Borderline — IPQS decides the outcome |
+        | 76 – 100 | ❌ No | Already critical — don't waste credits |
 
-        ---
-        ### For Gmail Specifically — Engagement Is Everything
-
-        ```
-        Gmail account lifecycle:
-        
-        Active user           →  Opens emails regularly  →  Safe ✅
-               ↓
-        Stops using Gmail     →  No opens for 6 months   →  Warning ⚠️ 
-               ↓
-        Google deactivates    →  No opens for 12 months  →  Danger 🔴
-               ↓
-        Google recycles it    →  Turned into spam trap   →  🚨 BLACKLIST RISK
-        ```
-
-        **Best practice:** Remove anyone who hasn't opened an email in **12 months** 
-        from your Gmail/Yahoo/Hotmail segments before they become a trap.
+        **Result:** For 10,000 emails, only ~1,500-2,000 borderline ones hit IPQS.
+        That's within the 1,000/month free tier if you run in batches,
+        or a very small cost on the $25/month plan.
         """)
 
+        st.markdown("---")
+        st.markdown("### Last Active — All Sources")
+        st.markdown("""
+        | Source | Gives Last Active? | Quality | Cost |
+        |---|---|---|---|
+        | **GitHub `updated_at`** | ✅ Exact date | HIGHEST | Free |
+        | **Reddit last post** | ✅ Exact date | HIGH | Free |
+        | **IPQS `active` field** | ✅ Current status | HIGH | 1k free/mo |
+        | **HIBP breach date** | ⚠️ Proxy (year only) | MEDIUM | Free key |
+        | **Gravatar** | ❌ Existence only | LOW | Free |
+        """)
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
